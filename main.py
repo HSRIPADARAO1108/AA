@@ -44,11 +44,19 @@ def check_location(loc):
         return False
     
     # --- TESTING MODE: ALWAYS ALLOWED ---
-    # We display your real coordinates so you can save them for your final demo
-    st.info(f"📍 DEBUG MODE: Your Location is Lat: {loc['coords']['latitude']}, Lon: {loc['coords']['longitude']}")
+    # Safe check to make sure 'coords' keys are present in the response object
+    if 'coords' in loc:
+        lat = loc['coords'].get('latitude', 'Unknown')
+        lon = loc['coords'].get('longitude', 'Unknown')
+        st.info(f"📍 DEBUG MODE: Your Location is Lat: {lat}, Lon: {lon}")
+    else:
+        st.warning("⚠️ Geolocation data payload is missing expected structural properties.")
+    
     return True 
 
     # --- PRODUCTION MODE (Uncomment this for final submission) ---
+    # if 'coords' not in loc:
+    #     return False
     # lat_diff = abs(loc['coords']['latitude'] - CLASSROOM_LAT)
     # lon_diff = abs(loc['coords']['longitude'] - CLASSROOM_LON)
     # return lat_diff < ALLOWED_RADIUS and lon_diff < ALLOWED_RADIUS
@@ -75,24 +83,30 @@ if page == "New User Registration":
             with st.spinner("Uploading Profile to AWS..."):
                 img_bytes = reg_photo.getvalue()
                 
-                # 1. Upload Reference Image to S3
-                s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{usn}.jpg", Body=img_bytes)
+                # Sanitize USN to remove accidental leading/trailing whitespaces for AWS constraints
+                cleaned_usn = usn.strip()
                 
-                # 2. Index Face in Rekognition Collection
-                rekog.index_faces(
-                    CollectionId=COLLECTION_ID,
-                    Image={'Bytes': img_bytes},
-                    ExternalImageId=usn, # Links this face-print to the USN
-                    MaxFaces=1
-                )
-                
-                # 3. Store Profile & Password in DynamoDB
-                dynamo.Table(TABLE_PROFILES).put_item(Item={
-                    'USN': usn,
-                    'Name': full_name,
-                    'Password': password
-                })
-                st.success(f"Registration successful for {full_name} ({usn})!")
+                try:
+                    # 1. Upload Reference Image to S3 using the cleaned filename
+                    s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{cleaned_usn}.jpg", Body=img_bytes)
+                    
+                    # 2. Index Face in Rekognition Collection
+                    rekog.index_faces(
+                        CollectionId=COLLECTION_ID,
+                        Image={'Bytes': img_bytes},
+                        ExternalImageId=cleaned_usn, # Links this face-print safely to stripped USN
+                        MaxFaces=1
+                    )
+                    
+                    # 3. Store Profile & Password in DynamoDB
+                    dynamo.Table(TABLE_PROFILES).put_item(Item={
+                        'USN': cleaned_usn,
+                        'Name': full_name,
+                        'Password': password
+                    })
+                    st.success(f"Registration successful for {full_name} ({cleaned_usn})!")
+                except Exception as aws_error:
+                    st.error(f"AWS Error: {aws_error}")
         else:
             st.error("Please fill all fields and capture your photo.")
 
