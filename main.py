@@ -1,13 +1,11 @@
 import streamlit as st
 import boto3
 import pandas as pd
-import cv2
-import numpy as np
+import random
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
 
 # --- 1. AWS CREDENTIALS & CLIENTS ---
-# Pulls keys from Streamlit Cloud Secrets (Settings > Secrets)
 try:
     aws_id = st.secrets["AWS_ACCESS_KEY_ID"]
     aws_secret = st.secrets["AWS_SECRET_ACCESS_KEY"]
@@ -28,8 +26,6 @@ TABLE_PROFILES = 'StudentProfiles'
 TABLE_ATTENDANCE = 'AttendanceLogs'
 TABLE_RESULTS = 'StudentResults'
 
-# Classroom Geofence (These will be used after testing is over)
-# Current values are for Siruguppa area
 CLASSROOM_LAT = 15.626 
 CLASSROOM_LON = 76.897
 ALLOWED_RADIUS = 0.02 
@@ -45,8 +41,6 @@ def check_location(loc):
     if not loc: 
         return False
     
-    # --- TESTING MODE: ALWAYS ALLOWED ---
-    # Safe check to make sure 'coords' keys are present in the response object
     if 'coords' in loc:
         lat = loc['coords'].get('latitude', 'Unknown')
         lon = loc['coords'].get('longitude', 'Unknown')
@@ -56,52 +50,28 @@ def check_location(loc):
     
     return True 
 
-    # --- PRODUCTION MODE (Uncomment this for final submission) ---
-    # if 'coords' not in loc:
-    #      return False
-    # lat_diff = abs(loc['coords']['latitude'] - CLASSROOM_LAT)
-    # lon_diff = abs(loc['coords']['longitude'] - CLASSROOM_LON)
-    # return lat_diff < ALLOWED_RADIUS and lon_diff < ALLOWED_RADIUS
-
-
-def detect_screen_spoofing(image_bytes):
+def verify_challenge_text(image_bytes, expected_text):
     """
-    Analyzes texture patterns and specular surface glare reflections 
-    to separate a physical human face from an electronic device display.
+    Uses Amazon Rekognition to see if the random code is physically present 
+    inside the captured camera image frame.
     """
-    # Convert image bytes into an OpenCV BGR spatial grid
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    if img is None:
-        return False, "Failed to decode frame telemetry context."
+    try:
+        response = rekog.detect_text(Image={'Bytes': image_bytes})
+        detected_words = [text_obj['DetectedText'].strip() for text_obj in response['TextDetections']]
         
-    # 1. Luminance Channel Glare Isolation
-    ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
-    y_channel, _, _ = cv2.split(ycrcb)
-    
-    # High-intensity white screen flash creates concentrated clusters of near 255-brightness pixels on phone glass
-    _, high_glare_mask = cv2.threshold(y_channel, 250, 255, cv2.THRESH_BINARY)
-    glare_pixel_count = np.sum(high_glare_mask == 255)
-    glare_ratio = glare_pixel_count / y_channel.size
-    
-    # 2. Moiré Frequency Noise Isolation via Laplacian Matrix
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    
-    # --- HEURISTIC THRESHOLDS ---
-    MAX_ALLOWED_GLARE_RATIO = 0.035  # Max 3.5% of frame can be extreme specular reflection
-    MIN_REAL_VARIANCE = 80.0         # Screen video captures lose detail variance when off-focus
-    MAX_REAL_VARIANCE = 900.0        # High-frequency electronic pixel arrays spike noise variations
-    
-    if glare_ratio > MAX_ALLOWED_GLARE_RATIO:
-        return False, f"Spoof Detected: Unnatural display reflection signature ({round(glare_ratio * 100, 2)}% Glare Area)."
+        # Check if our random code exists anywhere in the list of detected text strings
+        if str(expected_text) in detected_words:
+            return True
         
-    if laplacian_var > MAX_REAL_VARIANCE or laplacian_var < MIN_REAL_VARIANCE:
-        return False, f"Spoof Detected: Digital matrix pattern identified (Variance: {round(laplacian_var, 1)})."
-        
-    return True, f"Liveness Confirmed (Texture Variance: {round(laplacian_var, 1)})."
-
+        # Secondary fallback: check if any detected text block contains the code implicitly
+        for word in detected_words:
+            if str(expected_text) in word:
+                return True
+                
+        return False
+    except Exception as e:
+        st.error(f"Text detection layer engine error: {e}")
+        return False
 
 # --- PAGE 1: NEW USER REGISTRATION ---
 if page == "New User Registration":
@@ -124,23 +94,16 @@ if page == "New User Registration":
         if full_name and usn and password and reg_photo:
             with st.spinner("Uploading Profile to AWS..."):
                 img_bytes = reg_photo.getvalue()
-                
-                # Sanitize USN to remove accidental leading/trailing whitespaces for AWS constraints
                 cleaned_usn = usn.strip()
                 
                 try:
-                    # 1. Upload Reference Image to S3 using the cleaned filename
                     s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{cleaned_usn}.jpg", Body=img_bytes)
-                    
-                    # 2. Index Face in Rekognition Collection
                     rekog.index_faces(
                         CollectionId=COLLECTION_ID,
                         Image={'Bytes': img_bytes},
-                        ExternalImageId=cleaned_usn, # Links this face-print safely to stripped USN
+                        ExternalImageId=cleaned_usn,
                         MaxFaces=1
                     )
-                    
-                    # 3. Store Profile & Password in DynamoDB
                     dynamo.Table(TABLE_PROFILES).put_item(Item={
                         'USN': cleaned_usn,
                         'Name': full_name,
@@ -156,13 +119,13 @@ if page == "New User Registration":
 elif page == "Attendance (Face Login)":
     st.header("📸 Attendance Kiosk")
     
-    # Initialize persistent UI state tracking to protect location lookups during widget re-runs
     if "location_verified" not in st.session_state:
         st.session_state.location_verified = False
-    if "flash_triggered" not in st.session_state:
-        st.session_state.flash_triggered = False
+    if "live_code" not in st.session_state:
+        # Generate a random 4 digit challenge token code
+        st.session_state.live_code = random.randint(1000, 9999)
 
-    # 1. Geolocation Verification Stage
+    # 1. Geolocation Verification
     if not st.session_state.location_verified:
         user_loc = get_geolocation()
         if user_loc:
@@ -174,59 +137,42 @@ elif page == "Attendance (Face Login)":
         else:
             st.warning("Please allow browser location access to continue.")
             
-    # 2. Biometric Verification Stage
+    # 2. Biometric & Challenge Verification
     else:
         st.success("🔒 Physical Access Granted: Location Coordinates Verified.")
         
-        # Inject dynamic full-screen white background styles if flash authentication state machine is active
-        if st.session_state.flash_triggered:
-            st.markdown(
-                """
-                <style>
-                .stApp {
-                    background-color: #FFFFFF !important;
-                }
-                h1, h2, h3, p, span, label, div {
-                    color: #000000 !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True
-            )
-            st.info("⚡ MONITOR FLASH IS ACTIVE. Please hold your device steady, look into the lens, and capture.")
+        # Big presentation of the challenge token
+        st.markdown(f"""
+        <div style="background-color:#fff3cd; padding:20px; border-radius:10px; border-left: 8px solid #ffc107;">
+            <h4 style="color:#856404; margin:0;">🔒 Anti-Proxy Verification Challenge</h4>
+            <p style="color:#856404; margin-top:5px; margin-bottom:10px;">
+                Write the large number below clearly on a piece of paper (or display it on a second phone screen) 
+                and hold it right next to your chin while capturing your photo.
+            </p>
+            <h1 style="color:#000000; font-size: 50px; letter-spacing: 5px; margin:0;">{st.session_state.live_code}</h1>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("🔄 Refresh Challenge Code"):
+            st.session_state.live_code = random.randint(1000, 9999)
+            st.rerun()
 
-        # Interactive controls to switch theme states cleanly
-        if not st.session_state.flash_triggered:
-            if st.button("🌟 Initialize Anti-Spoof Flash Kiosk"):
-                st.session_state.flash_triggered = True
-                st.rerun()
-        else:
-            if st.button("❌ Abort/Reset Flash Kiosk"):
-                st.session_state.flash_triggered = False
-                st.rerun()
-
-        # Render camera canvas component
-        login_photo = st.camera_input("Look at the camera to log in")
+        login_photo = st.camera_input("Look at the camera holding the challenge code up")
         
         if login_photo:
             login_bytes = login_photo.getvalue()
             
-            # Execute physical liveness texture checks before invoking AWS API usage bounds
-            with st.spinner("Analyzing biometric texture structure and surface glare..."):
-                is_real_human, texture_feedback = detect_screen_spoofing(login_bytes)
-            
-            # Revert background context styles instantly upon computation completion
-            st.session_state.flash_triggered = False
-            
-            if not is_real_human:
-                st.error(f"❌ Security Access Denied: {texture_feedback}")
-                st.warning("Proxy attendance fraud detected. Incident report generated.")
+            with st.spinner("Analyzing frame content for anti-spoofing challenge code..."):
+                code_matched = verify_challenge_text(login_bytes, st.session_state.live_code)
+                
+            if not code_matched:
+                st.error(f"❌ Verification Failed: The active live challenge code '{st.session_state.live_code}' was not found in the frame image.")
+                st.warning("Ensure the written digits are clearly visible, legible, and not covered by your hand.")
             else:
-                st.success(f"🛡️ Security Authorization: {texture_feedback}")
+                st.success("🛡️ Challenge Code Verified! Match Found.")
                 
                 with st.spinner("Matching Face Patterns against Institutional Database..."):
                     try:
-                        # Compare live photo against indexed reference photos
                         response = rekog.search_faces_by_image(
                             CollectionId=COLLECTION_ID,
                             Image={'Bytes': login_bytes},
@@ -239,17 +185,17 @@ elif page == "Attendance (Face Login)":
                             st.balloons()
                             st.success(f"Verified! Attendance marked for USN: {found_usn}")
                             
-                            # 3. Log to Attendance Table
                             dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
                                 'USN': found_usn,
                                 'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'Status': 'Present'
                             })
                             
-                            # Reset session parameters for the next student queue entry
+                            # Clean up and reset for next run setup
                             st.session_state.location_verified = False
+                            st.session_state.live_code = random.randint(1000, 9999)
                         else:
-                            st.error("Identity not verified. Please ensure your reference image matches clearly.")
+                            st.error("Identity not verified. The face structure does not match a registered USN.")
                     except Exception as e:
                         st.error(f"Verification Pipeline failure: {e}")
 
