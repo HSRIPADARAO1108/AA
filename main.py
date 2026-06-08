@@ -43,7 +43,7 @@ ALLOWED_RADIUS = 0.02
 
 # Security configurations for token validation
 HMAC_SECRET_KEY = "SECRET_COLLEGE_PORTAL_SIGNING_SALT_KEY"
-QR_EXPIRY_SECONDS = 30  # ⏱️ QR code shifts values and resets every 30 seconds
+QR_EXPIRY_SECONDS = 60 # ⏱️ QR code shifts values and resets every 30 seconds
 
 # --- 3. CRYPTOGRAPHIC HANDSHAKE UTILITIES ---
 def generate_secure_token():
