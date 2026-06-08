@@ -224,7 +224,7 @@ else:
             # Example: base_app_url = "https://your-college-portal.streamlit.app"
             # If running locally on local Wi-Fi, use your laptop's Local Network IP instead of localhost:
             # Example: base_app_url = "http://192.168.1.45:8501"
-            base_app_url = "http://localhost:8501" 
+            base_app_url = "https://ty7896.streamlit.app" 
             
             target_scan_url = f"{base_app_url}/?mode=student&token={current_token}&block={time_block_id}"
             
