@@ -219,9 +219,13 @@ else:
             # Generate temporary rotating authorization hash string parameters
             current_token, time_block_id = generate_secure_token()
             
-            # CRITICAL PRODUCTION TASK: Change the text link address below to match your real deployed portal cloud URL domain address string
-            # Example: base_app_url = "https://college-portal.streamlit.app"
+            # 🔧 CRITICAL PRODUCTION TASK FOR CLOUD DEPLOYMENT:
+            # If deploying live on Streamlit Cloud, update this variable to point to your live URL domain string.
+            # Example: base_app_url = "https://your-college-portal.streamlit.app"
+            # If running locally on local Wi-Fi, use your laptop's Local Network IP instead of localhost:
+            # Example: base_app_url = "http://192.168.1.45:8501"
             base_app_url = "http://localhost:8501" 
+            
             target_scan_url = f"{base_app_url}/?mode=student&token={current_token}&block={time_block_id}"
             
             # Render a high-density black/white image array wrapper card
