@@ -42,7 +42,7 @@ ALLOWED_RADIUS = 0.02
 
 # Security configurations for token validation
 HMAC_SECRET_KEY = "SECRET_COLLEGE_PORTAL_SIGNING_SALT_KEY"
-QR_EXPIRY_SECONDS = 15  # The QR code signature automatically rotates every 15 seconds
+QR_EXPIRY_SECONDS = 40  # The QR code signature automatically rotates every 15 seconds
 
 # --- 3. CRYPTOGRAPHIC HANDSHAKE UTILITIES ---
 def generate_secure_token():
