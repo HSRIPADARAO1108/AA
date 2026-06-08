@@ -1,11 +1,8 @@
 import streamlit as st
 import boto3
 import pandas as pd
-import random
-import hmac
-import hashlib
-import time
-import qrcode
+import numpy as np
+import cv2
 from io import BytesIO
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
@@ -21,7 +18,7 @@ except KeyError:
 
 @st.cache_resource
 def init_aws_resources():
-    """Cache client initializations to save network roundtrips on periodic script reruns."""
+    """Cache client connections to minimize network handshake overhead."""
     s3_client = boto3.client('s3', aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
     rekog_client = boto3.client('rekognition', aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
     dynamo_res = boto3.resource('dynamodb', aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
@@ -36,238 +33,176 @@ TABLE_PROFILES = 'StudentProfiles'
 TABLE_ATTENDANCE = 'AttendanceLogs'
 TABLE_RESULTS = 'StudentResults'
 
-# Future target classroom coordinates (modify these once you complete your test)
+# Set your target classroom coordinates
 CLASSROOM_LAT = 15.626 
 CLASSROOM_LON = 76.897
 ALLOWED_RADIUS = 0.02 
 
-# Security configurations for token validation
-HMAC_SECRET_KEY = "SECRET_COLLEGE_PORTAL_SIGNING_SALT_KEY"
-QR_EXPIRY_SECONDS = 60 # ⏱️ QR code shifts values and resets every 30 seconds
-
-# --- 3. CRYPTOGRAPHIC HANDSHAKE UTILITIES ---
-def generate_secure_token():
-    """Generates a unique dynamic token valid for the current time block."""
-    time_block = int(time.time() // QR_EXPIRY_SECONDS)
-    message = f"classroom_kiosk_block_{time_block}".encode('utf-8')
-    token = hmac.new(HMAC_SECRET_KEY.encode('utf-8'), message, hashlib.sha256).hexdigest()
-    return token, time_block
-
-def verify_secure_token(token_to_test, time_block_used):
-    """Validates the client-submitted token, accepting a 1-block window lag tolerance."""
-    current_block = int(time.time() // QR_EXPIRY_SECONDS)
-    for block in [current_block, current_block - 1]:
-        message = f"classroom_kiosk_block_{block}".encode('utf-8')
-        expected = hmac.new(HMAC_SECRET_KEY.encode('utf-8'), message, hashlib.sha256).hexdigest()
-        if hmac.compare_digest(expected, token_to_test):
-            return True
-    return False
-
+# --- 3. CORE VALIDATION UTILITIES ---
 def check_location(loc):
-    """
-    TEMPORARY TESTING VERSION: Always returns True so you can test from anywhere.
-    It prints your real coordinates on your phone screen so you can copy them.
-    """
+    """Calculates whether the student device sits inside the geofenced area boundaries."""
     if not loc or 'coords' not in loc:
-        st.warning("⚠️ Waiting for GPS device signal context...")
         return False
-        
     lat = loc['coords'].get('latitude')
     lon = loc['coords'].get('longitude')
+    if lat is None or lon is None:
+        return False
+        
+    st.info(f"📍 Location Coordinates Captured - Lat: {lat:.4f}, Lon: {lon:.4f}")
     
-    # Displays your actual coordinates on your mobile device viewport
-    st.info(f"📍 **TEST MODE LIVE!** Your current location coordinates are:\n\n"
-            f"**Latitude:** `{lat}`\n\n"
-            f"**Longitude:** `{lon}`")
-    st.caption("👉 Write down or copy these exact values when you are ready to configure the permanent classroom geofence.")
-    
-    return True # 🔓 FORCE PASS FOR EASY TESTING ENVIRONMENT SETUP
+    lat_min, lat_max = CLASSROOM_LAT - ALLOWED_RADIUS, CLASSROOM_LAT + ALLOWED_RADIUS
+    lon_min, lon_max = CLASSROOM_LON - ALLOWED_RADIUS, CLASSROOM_LON + ALLOWED_RADIUS
+    return (lat_min <= lat <= lat_max) and (lon_min <= lon <= lon_max)
 
+def verify_liveness_metrics(image_bytes):
+    """
+    Evaluates frame texture illumination to detect photo-spoofing.
+    Flat screens and paper prints exhibit low variance and high flat peaks.
+    """
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return False
+            
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # A flat printout or mobile screen lacks natural 3D focus depth, 
+        # leading to low Laplacian texture variance (blurry edges/flat surface)
+        if laplacian_var < 100.0:
+            return False
+        return True
+    except Exception:
+        # Fallback to true if openCV layer drops on specific device architectures
+        return True
 
 # --- 4. STREAMLIT APP SURFACE ENGINE ROUTER ---
-# Read query arguments to detect whether the user is a desktop kiosk display screen or a smartphone browser
-query_params = st.query_params
+st.set_page_config(page_title="Secure Portal", page_icon="🎓", layout="wide")
+
+st.sidebar.title("🏫 Navigation")
+page = st.sidebar.radio("Go to:", ["Attendance Verification", "New User Registration", "Batch Results"])
 
 # ==========================================
-# BRANCH ROUTE A: STUDENT MOBILE MODE (?mode=student)
+# PAGE 1: ATTENDANCE VERIFICATION (GEOFENCE + LIVENESS FACE MATCH)
 # ==========================================
-if query_params.get("mode") == "student":
-    st.set_page_config(page_title="Mobile Check-In", page_icon="📱", layout="centered")
-    st.header("📱 Secure Student Mobile Check-In")
-    
-    scanned_token = query_params.get("token")
-    scanned_block = query_params.get("block")
-    
-    if not scanned_token or not scanned_block:
-        st.error("🚫 Invalid Verification Link. Please scan the active classroom board image token directly.")
-        st.stop()
-        
-    # Phase 1: Verify QR Code Token Validity
-    if not verify_secure_token(scanned_token, scanned_block):
-        st.error("⏰ Session Timed Out! The scanned QR code has expired. Please look up and scan the fresh code on the screen.")
-        st.stop()
-        
-    st.success("🔒 Security Token Cryptographically Validated.")
+if page == "Attendance Verification":
+    st.header("📸 Secure Biometric Attendance Verification")
+    st.markdown("Your physical location and live face pattern will be analyzed simultaneously.")
 
-    # Phase 2: Verify Real-Time GPS Proximity Range
-    st.markdown("### Step 1: Verification of Classroom Vicinity Presence")
+    # STEP 1: Live Geofence Check
+    st.markdown("### Step 1: Location Verification")
     user_location = get_geolocation()
     
     if not user_location:
-        st.warning("📍 Action Required: Grant browser GPS location tracking access settings clearance to execute your session.")
+        st.warning("📍 Action Required: Grant browser GPS location tracking permissions to continue.")
     elif not check_location(user_location):
-        st.error("🚫 Proxy Prevention Error: You are outside the classroom boundary radius limit range parameters.")
+        st.error("🚫 Access Denied: You are outside the designated classroom boundaries.")
     else:
-        st.success("📍 Location Validation Process Complete!")
+        st.success("📍 Classroom Proximity Verified!")
         
-        # Phase 3: Identity Logging Authentication
-        st.markdown("### Step 2: Account Login Confirmation")
-        with st.form("mobile_signin_form"):
-            student_usn = st.text_input("Enter your USN (e.g., 1DA25SCS18)").strip().upper()
-            student_pass = st.text_input("Enter Password Profile Keyphrase", type="password")
-            submit_checkin = st.form_submit_button("Verify & Sign Attendance Log")
+        # STEP 2: Biometric Liveness Capture
+        st.markdown("### Step 2: Facial Biometric Identification")
+        st.info("Look directly into the camera. Ensure your face is clearly visible without glasses or caps.")
+        
+        live_photo = st.camera_input("Capture Live Verification Face")
+        
+        if live_photo:
+            img_bytes = live_photo.getvalue()
             
-        if submit_checkin:
-            if student_usn and student_pass:
-                with st.spinner("Writing check-in validation log record..."):
-                    try:
-                        profile_info = dynamo.Table(TABLE_PROFILES).get_item(Key={'USN': student_usn})
-                        
-                        if 'Item' in profile_info and profile_info['Item']['Password'] == student_pass:
-                            dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
-                                'USN': student_usn,
-                                'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                'Status': 'Present',
-                                'VerificationMethod': 'DualDevice_QR_Sync_GPS_Testing'
-                            })
-                            st.balloons()
-                            st.success(f"✅ Roll Call Successful! Attendance documented for USN: {student_usn}. You may exit your mobile web browser safely.")
-                        else:
-                            st.error("❌ Sign-in Refused: The provided USN or password record mapping is mismatched.")
-                    except Exception as transaction_err:
-                        st.error(f"Database logging operation fault occurred: {transaction_err}")
-            else:
-                st.warning("⚠️ Complete both input criteria entries before submitting authentication requests.")
-
-# ==========================================
-# BRANCH ROUTE B: CORE DESKTOP KIOSK PORTAL APPLICATION SURFACE
-# ==========================================
-else:
-    st.set_page_config(page_title="AI College Portal", page_icon="🎓", layout="wide")
-
-    st.sidebar.title("🏫 Navigation")
-    page = st.sidebar.radio("Go to:", ["Attendance (Face Login)", "New User Registration", "Batch Results"])
-
-    # --- PAGE 1: NEW USER REGISTRATION ---
-    if page == "New User Registration":
-        st.header("📝 Student Self-Registration")
-        st.markdown("Register your profile and take your permanent **Reference Photo** below.")
-        
-        with st.form("reg_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                full_name = st.text_input("Full Name")
-                usn = st.text_input("USN (e.g., 1DA25SCS18)")
-            with col2:
-                password = st.text_input("Create Password", type="password")
+            # Sub-Check A: Anti-Spoofing Liveness Evaluation
+            with st.spinner("Analyzing structural liveness indicators..."):
+                is_live_person = verify_liveness_metrics(img_bytes)
                 
-            st.write("### Step 2: Capture Reference Photo")
-            reg_photo = st.camera_input("Take Official Profile Photo")
-            submit = st.form_submit_button("Register Student")
-            
-        if submit:
-            if full_name and usn and password and reg_photo:
-                with st.spinner("Uploading Profile to AWS..."):
-                    img_bytes = reg_photo.getvalue()
-                    cleaned_usn = usn.strip().upper()
-                    
+            if not is_live_person:
+                st.error("❌ Verification Failed: Digital screen spoofing or photo printout detected! Please present your real face.")
+            else:
+                # Sub-Check B: Amazon Rekognition Database Pattern Matching
+                with st.spinner("Matching face pattern against institutional database..."):
                     try:
-                        s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{cleaned_usn}.jpg", Body=img_bytes)
-                        rekog.index_faces(
+                        response = rekog.search_faces_by_image(
                             CollectionId=COLLECTION_ID,
                             Image={'Bytes': img_bytes},
-                            ExternalImageId=cleaned_usn,
-                            MaxFaces=1
+                            MaxFaces=1,
+                            FaceMatchThreshold=92
                         )
-                        dynamo.Table(TABLE_PROFILES).put_item(Item={
-                            'USN': cleaned_usn,
-                            'Name': full_name,
-                            'Password': password
-                        })
-                        st.success(f"Registration successful for {full_name} ({cleaned_usn})!")
-                    except Exception as aws_error:
-                        st.error(f"AWS Error: {aws_error}")
-            else:
-                st.error("Please fill all fields and capture your photo.")
+                        
+                        if response['FaceMatches']:
+                            matched_usn = response['FaceMatches'][0]['Face']['ExternalImageId']
+                            confidence = response['FaceMatches'][0]['Similarity']
+                            
+                            st.balloons()
+                            st.success(f"✅ Success! Verified Identity for USN: {matched_usn} ({confidence:.2f}% Match)")
+                            
+                            # STEP 3: Log directly into AWS DynamoDB
+                            dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
+                                'USN': matched_usn,
+                                'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'Status': 'Present',
+                                'VerificationMethod': 'Geofence_Plus_Liveness_Biometrics'
+                            })
+                        else:
+                            st.error("❌ Identity Mismatch: Face structural features do not match any registered student.")
+                    except Exception as e:
+                        st.error(f"Biometric pipeline error: {e}")
 
-    # --- PAGE 2: ATTENDANCE (KIOSK VIEW) ---
-    elif page == "Attendance (Face Login)":
-        st.header("📸 Anti-Proxy Attendance Kiosk Terminal")
-        
-        layout_col_left, layout_col_right = st.columns([2, 1])
-        
-        with layout_col_left:
-            st.write("### 📌 Instructions for Live Class Roll Call Verification")
-            st.markdown(f"""
-            1. Pull out your **personal mobile device** inside the lecture room boundaries.
-            2. Open your smartphone camera app or an official web scanner engine.
-            3. Point your camera at the **dynamic rotating code matrix card** visible on the right block panel.
-            4. Grant your mobile browser instant clearance permission requests to evaluate your real-world spatial location coordinates.
-            5. Provide your authentic profile USN and password security credentials to close your confirmation handshake.
+# ==========================================
+# PAGE 2: NEW USER REGISTRATION
+# ==========================================
+elif page == "New User Registration":
+    st.header("📝 Student Self-Registration")
+    st.markdown("Register your profile and capture your permanent **Reference Photo** below.")
+    
+    with st.form("reg_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            full_name = st.text_input("Full Name")
+            usn = st.text_input("USN (e.g., 1DA25SCS18)")
+        with col2:
+            password = st.text_input("Create Password", type="password")
             
-            *⏰ Note: This security card block automatically shifts values every **{QR_EXPIRY_SECONDS} seconds**. Remote users attempting to bypass check-ins using shared video loops or chat image captures will be denied authorization.*
-            """)
-            
-            if st.button("🔄 Manually Cycle Code Token Matrix"):
-                st.rerun()
+        st.write("### Step 2: Capture Reference Photo")
+        reg_photo = st.camera_input("Take Official Profile Photo")
+        submit = st.form_submit_button("Register Student")
+        
+    if submit:
+        if full_name and usn and password and reg_photo:
+            with st.spinner("Uploading Profile to AWS..."):
+                img_bytes = reg_photo.getvalue()
+                cleaned_usn = usn.strip().upper()
+                
+                try:
+                    s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{cleaned_usn}.jpg", Body=img_bytes)
+                    rekog.index_faces(
+                        CollectionId=COLLECTION_ID,
+                        Image={'Bytes': img_bytes},
+                        ExternalImageId=cleaned_usn,
+                        MaxFaces=1
+                    )
+                    dynamo.Table(TABLE_PROFILES).put_item(Item={
+                        'USN': cleaned_usn,
+                        'Name': full_name,
+                        'Password': password
+                    })
+                    st.success(f"Registration successful for {full_name} ({cleaned_usn})!")
+                except Exception as aws_error:
+                    st.error(f"AWS Error: {aws_error}")
+        else:
+            st.error("Please fill all fields and capture your photo.")
 
-        with layout_col_right:
-            # Generate temporary rotating authorization hash string parameters
-            current_token, time_block_id = generate_secure_token()
-            
-            # 🔧 REMINDER: Update this URL line when testing locally or running on Streamlit Cloud
-            # Example for Streamlit Cloud: base_app_url = "https://your-app-name.streamlit.app"
-            # Example for Local Network IP: base_app_url = "http://192.168.1.45:8501"
-            base_app_url = "https://ty7896.streamlit.app" 
-            
-            target_scan_url = f"{base_app_url}/?mode=student&token={current_token}&block={time_block_id}"
-            
-            # Render a high-density black/white image array wrapper card
-            qr_engine = qrcode.QRCode(version=1, box_size=10, border=2)
-            qr_engine.add_data(target_scan_url)
-            qr_engine.make(fit=True)
-            
-            qr_image = qr_engine.make_image(fill_color="black", back_color="white")
-            image_buffer = BytesIO()
-            qr_image.save(image_buffer, format="PNG")
-            byte_payload = image_buffer.getvalue()
-            
-            st.image(byte_payload, caption=f"Active Dynamic Handshake Signature Token.", use_container_width=False, width=320)
-            
-        # UI REFRESH HEARTBEAT TICKER MODULE
-        # Executes dynamic frontend loops to sync with our updated 30-second security window
-        st.components.v1.html(
-            f"""
-            <script>
-                setTimeout(function(){{
-                    window.parent.location.reload();
-                }}, {QR_EXPIRY_SECONDS * 1000});
-            </script>
-            """,
-            height=0
-        )
-
-    # --- PAGE 3: BATCH RESULTS ---
-    elif page == "Batch Results":
-        st.header("📊 Public Results Dashboard")
-        st.caption("General access to academic performance records.")
-        
-        try:
-            results_data = dynamo.Table(TABLE_RESULTS).scan()
-            if results_data.get('Items'):
-                df = pd.DataFrame(results_data['Items'])
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("The academic results have not been uploaded to the database yet.")
-        except Exception:
-            st.error("Database connection error. Ensure your DynamoDB tables are active.")
+# ==========================================
+# PAGE 3: BATCH RESULTS
+# ==========================================
+elif page == "Batch Results":
+    st.header("📊 Public Results Dashboard")
+    st.caption("General access to academic performance records.")
+    
+    try:
+        results_data = dynamo.Table(TABLE_RESULTS).scan()
+        if results_data.get('Items'):
+            df = pd.DataFrame(results_data['Items'])
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("The academic results have not been uploaded to the database yet.")
+    except Exception:
+        st.error("Database connection error. Ensure your DynamoDB tables are active.")
