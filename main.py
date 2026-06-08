@@ -1,8 +1,3 @@
-Here is the complete, fully updated production code. This version has the **30-second refresh timer** built-in, and the location validation has been modified to **Test Mode** (it will accept your scan from anywhere and print your current coordinates on your phone screen so you can copy them later).
-
-### 🛠️ Complete Production Blueprint (`main.py`)
-
-```python
 import streamlit as st
 import boto3
 import pandas as pd
@@ -233,7 +228,7 @@ else:
             # 🔧 REMINDER: Update this URL line when testing locally or running on Streamlit Cloud
             # Example for Streamlit Cloud: base_app_url = "https://your-app-name.streamlit.app"
             # Example for Local Network IP: base_app_url = "http://192.168.1.45:8501"
-            base_app_url = "http://localhost:8501" 
+            base_app_url = "https://ty7896.streamlit.app" 
             
             target_scan_url = f"{base_app_url}/?mode=student&token={current_token}&block={time_block_id}"
             
@@ -276,5 +271,3 @@ else:
                 st.info("The academic results have not been uploaded to the database yet.")
         except Exception:
             st.error("Database connection error. Ensure your DynamoDB tables are active.")
-
-```
