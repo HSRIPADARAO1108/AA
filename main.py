@@ -183,6 +183,7 @@ def render_liveness_widget(session_id):
         """  setTimeout(function(){\n"""
         """    showDone();\n"""
         """    setTimeout(function(){\n"""
+        """      // Send tracking token up to Parent context\n"""
         """      window.parent.postMessage({type:"LIVENESS_COMPLETE",sessionId:SID}, "*");\n"""
         """    },900);\n"""
         """  },1300);\n"""
@@ -192,22 +193,6 @@ def render_liveness_widget(session_id):
     )
     html = HTML_TEMPLATE.replace("REPLACE_SID", session_id)
     components.html(html, height=560, scrolling=False)
-    
-    # 🌟 BRIDGE COMPONENT: Catches frontend postMessage and alters URL context parameters
-    components.html(
-        """
-        <script>
-        window.parent.addEventListener("message", function(e) {
-            if(e.data && e.data.type === "LIVENESS_COMPLETE") {
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set("liveness_done", e.data.sessionId);
-                window.parent.location.href = url.toString();
-            }
-        });
-        </script>
-        """,
-        height=0
-    )
 
 # ============================================================
 # 6. PAGE CONFIG & NAVIGATION
@@ -233,27 +218,6 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# ── Process incoming Liveness signals from JS Bridge ─────────
-query = st.query_params
-if "liveness_done" in query and not st.session_state.liveness_done:
-    incoming_sid = query["liveness_done"]
-    if incoming_sid == st.session_state.liveness_session_id:
-        try:
-            result = get_liveness_result(incoming_sid)
-            st.session_state.liveness_confidence = result['confidence']
-            st.session_state.reference_img_bytes = result['reference_image_bytes']
-            st.session_state.liveness_passed = (
-                result['status'] == 'SUCCEEDED' and
-                result['confidence'] >= LIVENESS_CONFIDENCE_THRESHOLD
-            )
-        except Exception as e:
-            st.session_state.liveness_passed = False
-            st.warning(f"Liveness result fetch error: {e}")
-        
-        st.session_state.liveness_done = True
-        st.query_params.clear()
-        st.rerun()
 
 
 # ============================================================
@@ -286,6 +250,8 @@ if page == "Attendance Verification":
     st.markdown("---")
     st.markdown("### Step 2 of 3 — 🔬 Live Presence Verification (Anti-Spoofing)")
 
+    # 🌟 CRITICAL BRIDGE FIX: Form-based pipeline capture 🌟
+    # We place a state handler that intercepts the completion event and runs synchronously BEFORE st.stop()
     if not st.session_state.liveness_done:
         if st.session_state.liveness_session_id is None:
             with st.spinner("Creating liveness session…"):
@@ -305,8 +271,61 @@ if page == "Attendance Verification":
             "• This challenge cannot be passed using a printed photo or screen recording."
         )
 
+        # Render custom widget box
         render_liveness_widget(sid)
         st.caption(f"Session ID: `{sid}` | Confidence threshold: ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%")
+
+        # 🌟 DOM Execution Bridge to dynamically wake up Streamlit State Engine 🌟
+        # We listen for the postMessage, write the confirmation directly into a hidden text input, 
+        # and tap the hidden button to submit it without locking up execution.
+        with st.form("liveness_callback_bridge"):
+            token_input = st.text_input("Session Sync Code (Auto)", value="", key="js_token_sync", type="password")
+            submitted = st.form_submit_button("Verify & Finalize Match ➡️")
+            
+            components.html(
+                f"""
+                <script>
+                window.parent.addEventListener("message", function(e) {{
+                    if(e.data && e.data.type === "LIVENESS_COMPLETE") {{
+                        // Inject value to the native Streamlit DOM text elements
+                        var inputs = window.parent.document.querySelectorAll("input[type='password']");
+                        for (var i = 0; i < inputs.length; i++) {{
+                            if(inputs[i].getAttribute("aria-label") === "Session Sync Code (Auto)") {{
+                                inputs[i].value = e.data.sessionId;
+                                inputs[i].dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                
+                                // Auto fire the processing pipeline button
+                                setTimeout(function() {{
+                                    var buttons = window.parent.document.querySelectorAll("button");
+                                    for(var j=0; j<buttons.length; j++) {{
+                                        if(buttons[j].textContent.includes("Verify & Finalize Match")) {{
+                                            buttons[j].click();
+                                        }}
+                                    }}
+                                }}, 150);
+                            }}
+                        }}
+                    }}
+                }});
+                </script>
+                """,
+                height=0
+            )
+
+        if submitted and token_input == st.session_state.liveness_session_id:
+            with st.spinner("Processing results from session token..."):
+                try:
+                    result = get_liveness_result(st.session_state.liveness_session_id)
+                    st.session_state.liveness_confidence = result['confidence']
+                    st.session_state.reference_img_bytes = result['reference_image_bytes']
+                    st.session_state.liveness_passed = (
+                        result['status'] == 'SUCCEEDED' and
+                        result['confidence'] >= LIVENESS_CONFIDENCE_THRESHOLD
+                    )
+                    st.session_state.liveness_done = True
+                    st.rerun()
+                except Exception as err:
+                    st.error(f"Error reading token callback context: {err}")
         st.stop()
 
     # Liveness result evaluation
@@ -327,7 +346,6 @@ if page == "Attendance Verification":
     
     ref_bytes = st.session_state.reference_img_bytes
 
-    # Fallback structure to direct download from S3 if stream didn't resolve instantly
     if ref_bytes is None:
         with st.spinner("Retrieving reference frame from secure session store..."):
             try:
@@ -359,7 +377,7 @@ if page == "Attendance Verification":
                 st.success(
                     f"🎉 **Attendance Recorded Successfully!**\n\n"
                     f"**USN:** {matched_usn} | "
-                    f"**Face Match Match:** {confidence:.2f}% | "
+                    f"**Face Match:** {confidence:.2f}% | "
                     f"**Liveness:** {st.session_state.liveness_confidence:.1f}%"
                 )
 
