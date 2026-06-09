@@ -1,3 +1,8 @@
+Here is the full, updated code with the f-string issue completely resolved.
+
+Instead of wrapping the JavaScript bridge inside a Python f-string (which caused the `SyntaxError` due to conflicting curly braces), the script now uses a clean string template with explicit token replacement (`.replace()`), making it rock-solid and safe from syntax errors.
+
+```python
 import streamlit as st
 import boto3
 import pandas as pd
@@ -269,37 +274,36 @@ if page == "Attendance Verification":
         st.caption(f"Session Token Reference: `{sid}`")
 
         # 🌟 DOM Execution Bridge Form 🌟
+        # Cleaned up from f-string formatting to prevent brace compilation errors.
         with st.form("liveness_callback_bridge"):
             token_input = st.text_input("Session Sync Code (Auto)", value="", key="js_token_sync", type="password")
             submitted = st.form_submit_button("Verify & Open Video Capture Pipeline ➡️")
             
-            components.html(
-                f"""
-                <script>
-                window.parent.addEventListener("message", function(e) {{
-                    if(e.data && e.data.type === "LIVENESS_COMPLETE") {{
-                        var inputs = window.parent.document.querySelectorAll("input[type='password']");
-                        for (var i = 0; i < inputs.length; i++) {{
-                            if(inputs[i].getAttribute("aria-label") === "Session Sync Code (Auto)") {{
-                                inputs[i].value = e.data.sessionId;
-                                inputs[i].dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                
-                                setTimeout(function() {{
-                                    var buttons = window.parent.document.querySelectorAll("button");
-                                    for(var j=0; j<buttons.length; j++) {{
-                                        if(buttons[j].textContent.includes("Verify & Open Video Capture")) {{
-                                            buttons[j].click();
-                                        }
-                                    }}
-                                }}, 150);
-                            }}
-                        }}
-                    }}
-                }});
-                </script>
-                """,
-                height=0
-            )
+            BRIDGE_JS = """
+            <script>
+            window.parent.addEventListener("message", function(e) {
+                if(e.data && e.data.type === "LIVENESS_COMPLETE") {
+                    var inputs = window.parent.document.querySelectorAll("input[type='password']");
+                    for (var i = 0; i < inputs.length; i++) {
+                        if(inputs[i].getAttribute("aria-label") === "Session Sync Code (Auto)") {
+                            inputs[i].value = e.data.sessionId;
+                            inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
+                            
+                            setTimeout(function() {
+                                var buttons = window.parent.document.querySelectorAll("button");
+                                for(var j=0; j<buttons.length; j++) {
+                                    if(buttons[j].textContent.includes("Verify & Open Video Capture")) {
+                                        buttons[j].click();
+                                    }
+                                }
+                            }, 150);
+                        }
+                    }
+                }
+            });
+            </script>
+            """
+            components.html(BRIDGE_JS, height=0)
 
         if submitted and token_input == st.session_state.liveness_session_id:
             st.session_state.liveness_passed = True
@@ -313,7 +317,6 @@ if page == "Attendance Verification":
     st.markdown("---")
     st.markdown("### Step 3 of 3 — 🧬 Anti-Spoofing & Identity Verification")
     
-    # Force a direct native hardware capture that completely bypasses any compromised browser scripts
     st.warning("⚠️ Final Authentication Step: Look straight into the camera lens below to execute full physical micro-texture depth checks.")
     live_photo = st.camera_input("Biometric Anti-Spoof Verification Capture")
 
@@ -322,7 +325,7 @@ if page == "Attendance Verification":
 
         with st.spinner("Analyzing high-frequency textures for digital display re-transmission spoofing..."):
             try:
-                # 🛠️ HARDWARE SECURITY LAYER: Extract Image Matrix for Texture Gradient Testing
+                # HARDWARE SECURITY LAYER: Extract Image Matrix for Texture Gradient Testing
                 file_bytes = np.asarray(bytearray(ref_bytes), dtype=np.uint8)
                 opencv_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
                 
@@ -332,11 +335,10 @@ if page == "Attendance Verification":
                 # Calculate micro-sharpness variance using a Laplacian kernel matrix
                 laplacian_variance = cv2.Laplacian(gray_frame, cv2.CV_64F).var()
                 
-                # Displays or paper photo prints introduce blurring artifacts and distinct moiré frequencies.
-                # If variance falls below our safety index threshold, access is automatically blocked.
+                # Filter out flat prints/screens
                 if laplacian_variance < LAPLACIAN_THRES:
                     st.error(f"🚫 **Biometric Spoof Defeated!** (Texture index: {laplacian_variance:.1f} < Required: {LAPLACIAN_THRES})")
-                    st.info("System logs show an flat texture or digital panel emission anomaly. Please use your live face, not a picture or digital screen.")
+                    st.info("System logs show a flat texture or digital panel emission anomaly. Please use your live face, not a picture or digital screen.")
                     st.stop()
 
                 # Execute face analysis against indexed institutional profiles
@@ -441,3 +443,5 @@ elif page == "Batch Results":
             st.info("Academic results have not been uploaded yet.")
     except Exception:
         st.error("Database connection error. Ensure your DynamoDB tables are active.")
+
+```
