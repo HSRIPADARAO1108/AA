@@ -33,25 +33,23 @@ TABLE_PROFILES = 'StudentProfiles'
 TABLE_ATTENDANCE = 'AttendanceLogs'
 TABLE_RESULTS = 'StudentResults'
 
-# Set your target classroom coordinates
 CLASSROOM_LAT = 15.626 
 CLASSROOM_LON = 76.897
 ALLOWED_RADIUS = 0.02 
 
-# 🛠️ TESTING MODE FLAG: Set to False when deploying to production students
+# 🛠️ TESTING MODE FLAG: Set to False when deploying to production
 TESTING_MODE = True
 
 # --- 3. CORE VALIDATION UTILITIES ---
 def check_location(loc):
     """Calculates whether the student device sits inside the geofenced area boundaries."""
-    # If we are testing, log a visual bypass indicator and grant entry
     if TESTING_MODE:
         st.sidebar.warning("🛠️ Testing Mode Active: Geofence constraints bypassed.")
         if loc and 'coords' in loc:
             lat = loc['coords'].get('latitude')
             lon = loc['coords'].get('longitude')
             if lat is not None and lon is not None:
-                st.info(f"📍 Location Captured (Bypassed) - Lat: {lat:.4f}, Lon: {lon:.4f}")
+                st.sidebar.info(f"📍 Bypassed GPS - Lat: {lat:.4f}, Lon: {lon:.4f}")
         return True
 
     if not loc or 'coords' not in loc:
@@ -68,10 +66,7 @@ def check_location(loc):
     return (lat_min <= lat <= lat_max) and (lon_min <= lon <= lon_max)
 
 def verify_liveness_metrics(image_bytes):
-    """
-    Evaluates frame texture illumination to detect photo-spoofing.
-    Flat screens and paper prints exhibit low variance and high flat peaks.
-    """
+    """Evaluates frame texture illumination to detect photo-spoofing."""
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -81,13 +76,10 @@ def verify_liveness_metrics(image_bytes):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         
-        # A flat printout or mobile screen lacks natural 3D focus depth, 
-        # leading to low Laplacian texture variance (blurry edges/flat surface)
         if laplacian_var < 100.0:
             return False
         return True
     except Exception:
-        # Fallback to true if openCV layer drops on specific device architectures
         return True
 
 # --- 4. STREAMLIT APP SURFACE ENGINE ROUTER ---
@@ -96,42 +88,49 @@ st.set_page_config(page_title="Secure Portal", page_icon="🎓", layout="wide")
 st.sidebar.title("🏫 Navigation")
 page = st.sidebar.radio("Go to:", ["Attendance Verification", "New User Registration", "Batch Results"])
 
+# Initialize session state variables to prevent data loss on camera snapshots
+if "location_verified" not in st.session_state:
+    st.session_state.location_verified = False
+
 # ==========================================
-# PAGE 1: ATTENDANCE VERIFICATION (GEOFENCE + LIVENESS FACE MATCH)
+# PAGE 1: ATTENDANCE VERIFICATION
 # ==========================================
 if page == "Attendance Verification":
     st.header("📸 Secure Biometric Attendance Verification")
     st.markdown("Your physical location and live face pattern will be analyzed simultaneously.")
 
-    # STEP 1: Live Geofence Check
+    # STEP 1: Geofence Check (Cached in session state)
     st.markdown("### Step 1: Location Verification")
-    user_location = get_geolocation()
     
-    # In testing mode, we proceed even if the browser fails to pull geolocation structures
-    if not user_location and not TESTING_MODE:
-        st.warning("📍 Action Required: Grant browser GPS location tracking permissions to continue.")
-    elif not check_location(user_location):
-        st.error("🚫 Access Denied: You are outside the designated classroom boundaries.")
-    else:
+    if not st.session_state.location_verified:
+        user_location = get_geolocation()
+        
+        if not user_location and not TESTING_MODE:
+            st.warning("📍 Action Required: Grant browser GPS location tracking permissions to continue.")
+        elif check_location(user_location):
+            st.session_state.location_verified = True
+            st.rerun()
+        else:
+            st.error("🚫 Access Denied: You are outside the designated classroom boundaries.")
+    
+    # If location is verified, open Step 2
+    if st.session_state.location_verified:
         st.success("📍 Classroom Proximity Verified!")
-        
-        # STEP 2: Biometric Liveness Capture
         st.markdown("### Step 2: Facial Biometric Identification")
-        st.info("Look directly into the camera. Ensure your face is clearly visible without glasses or caps.")
+        st.info("Look directly into the camera. Ensure your face is clearly visible.")
         
+        # NOTE: If this box shows the permission error, use the browser-level fixes detailed above!
         live_photo = st.camera_input("Capture Live Verification Face")
         
         if live_photo:
             img_bytes = live_photo.getvalue()
             
-            # Sub-Check A: Anti-Spoofing Liveness Evaluation
             with st.spinner("Analyzing structural liveness indicators..."):
                 is_live_person = verify_liveness_metrics(img_bytes)
                 
             if not is_live_person:
-                st.error("❌ Verification Failed: Digital screen spoofing or photo printout detected! Please present your real face.")
+                st.error("❌ Verification Failed: Digital screen spoofing or photo printout detected!")
             else:
-                # Sub-Check B: Amazon Rekognition Database Pattern Matching
                 with st.spinner("Matching face pattern against institutional database..."):
                     try:
                         response = rekog.search_faces_by_image(
@@ -148,13 +147,14 @@ if page == "Attendance Verification":
                             st.balloons()
                             st.success(f"✅ Success! Verified Identity for USN: {matched_usn} ({confidence:.2f}% Match)")
                             
-                            # STEP 3: Log directly into AWS DynamoDB
                             dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
                                 'USN': matched_usn,
                                 'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'Status': 'Present',
                                 'VerificationMethod': 'Geofence_Plus_Liveness_Biometrics' if not TESTING_MODE else 'Bypassed_Testing_Mode'
                             })
+                            # Reset validation state for next student
+                            st.session_state.location_verified = False
                         else:
                             st.error("❌ Identity Mismatch: Face structural features do not match any registered student.")
                     except Exception as e:
@@ -165,7 +165,6 @@ if page == "Attendance Verification":
 # ==========================================
 elif page == "New User Registration":
     st.header("📝 Student Self-Registration")
-    st.markdown("Register your profile and capture your permanent **Reference Photo** below.")
     
     with st.form("reg_form"):
         col1, col2 = st.columns(2)
@@ -209,8 +208,6 @@ elif page == "New User Registration":
 # ==========================================
 elif page == "Batch Results":
     st.header("📊 Public Results Dashboard")
-    st.caption("General access to academic performance records.")
-    
     try:
         results_data = dynamo.Table(TABLE_RESULTS).scan()
         if results_data.get('Items'):
