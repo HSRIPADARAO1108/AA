@@ -157,9 +157,10 @@ def render_liveness_widget(session_id):
         """var SID="REPLACE_SID";\n"""
         """var vid=document.getElementById("vid"),oval=document.getElementById("oval"),flash=document.getElementById("flash"),bWrap=document.getElementById("barWrap"),bar=document.getElementById("bar"),instr=document.getElementById("instr"),area=document.getElementById("area"),permE=document.getElementById("perm-err");\n"""
         """var COLORS=["#ef4444","#22c55e","#3b82f6","#f59e0b","#a855f7","#ec4899"],TOTAL=5000,F_EVERY=700,F_HOLD=220,stream=null;\n"""
+        """var finished = false;\n"""
         """function clr(el){while(el.firstChild)el.removeChild(el.firstChild);}\n"""
         """function mkbtn(label,fn){var b=document.createElement("button");b.className="btn";b.textContent=label;b.onclick=fn;return b;}\n"""
-        """function showReady(){instr.textContent="Position your face inside the oval.";bWrap.style.display="none";clr(area);area.appendChild(mkbtn("Start Liveness Check",startChallenge));}\n"""
+        """function showReady(){if(finished) return; instr.textContent="Position your face inside the oval.";bWrap.style.display="none";clr(area);area.appendChild(mkbtn("Start Liveness Check",startChallenge));}\n"""
         """function showVerifying(){instr.textContent="Verifying with AWS...";bWrap.style.display="none";clr(area);var sp=document.createElement("div");sp.className="spinner";area.appendChild(sp);}\n"""
         """function showDone(){instr.textContent="";clr(area);var p=document.createElement("p");p.className="ok";p.textContent="Liveness confirmed! Processing match...";area.appendChild(p);}\n"""
         """function showError(){instr.textContent="";bWrap.style.display="none";clr(area);var p=document.createElement("p");p.className="err";p.textContent="Spoof detected. Please retry.";area.appendChild(p);area.appendChild(mkbtn("Retry",showReady));}\n"""
@@ -174,7 +175,7 @@ def render_liveness_widget(session_id):
         """  var iv=setInterval(function(){\n"""
         """    elapsed+=100;bar.style.width=Math.min((elapsed/TOTAL)*100,100)+'%';\n"""
         """    if(elapsed>=nextF){nextF+=F_EVERY;var col=COLORS[colorIdx%COLORS.length];colorIdx++;flash.style.background=col;flash.style.opacity="0.45";oval.style.borderColor=col;setTimeout(function(){flash.style.opacity="0";oval.style.borderColor="#38bdf8";},F_HOLD);}\n"""
-        """    if(elapsed>=TOTAL){clearInterval(iv);flash.style.opacity="0";oval.style.borderColor="#38bdf8";if(stream)stream.getTracks().forEach(function(t){t.stop();});finishChallenge();}\n"""
+        """    if(elapsed>=TOTAL){clearInterval(iv);flash.style.opacity="0";oval.style.borderColor="#38bdf8";if(stream)stream.getTracks().forEach(function(t){t.stop();});finished=true;finishChallenge();}\n"""
         """  },100);\n"""
         """}\n"""
         """function finishChallenge(){\n"""
@@ -182,7 +183,6 @@ def render_liveness_widget(session_id):
         """  setTimeout(function(){\n"""
         """    showDone();\n"""
         """    setTimeout(function(){\n"""
-        """      // Send message to the parent window message broker\n"""
         """      window.parent.postMessage({type:"LIVENESS_COMPLETE",sessionId:SID}, "*");\n"""
         """    },900);\n"""
         """  },1300);\n"""
@@ -193,8 +193,7 @@ def render_liveness_widget(session_id):
     html = HTML_TEMPLATE.replace("REPLACE_SID", session_id)
     components.html(html, height=560, scrolling=False)
     
-    # 🌟 FIXED: The missing state broker bridge that catches the JavaScript postMessage
-    # and explicitly forces Streamlit to reload with the new query string
+    # 🌟 BRIDGE COMPONENT: Catches frontend postMessage and alters URL context parameters
     components.html(
         """
         <script>
@@ -235,7 +234,7 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Process incoming Liveness signals ─────────────────────────
+# ── Process incoming Liveness signals from JS Bridge ─────────
 query = st.query_params
 if "liveness_done" in query and not st.session_state.liveness_done:
     incoming_sid = query["liveness_done"]
@@ -251,6 +250,7 @@ if "liveness_done" in query and not st.session_state.liveness_done:
         except Exception as e:
             st.session_state.liveness_passed = False
             st.warning(f"Liveness result fetch error: {e}")
+        
         st.session_state.liveness_done = True
         st.query_params.clear()
         st.rerun()
@@ -314,7 +314,6 @@ if page == "Attendance Verification":
         conf = st.session_state.liveness_confidence
         st.error(f"❌ Liveness check failed (confidence: {conf:.1f}% — required ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%).")
         if st.button("🔄 Try Again"):
-            # Cleanly clear state to let the user retake the test
             for k in ["liveness_session_id", "liveness_done", "liveness_passed", "liveness_confidence", "reference_img_bytes"]:
                 st.session_state[k] = False if isinstance(defaults[k], bool) else None
             st.rerun()
@@ -328,7 +327,7 @@ if page == "Attendance Verification":
     
     ref_bytes = st.session_state.reference_img_bytes
 
-    # Fallback to direct download from S3 if bytes stream isn't immediately returned over connection thread
+    # Fallback structure to direct download from S3 if stream didn't resolve instantly
     if ref_bytes is None:
         with st.spinner("Retrieving reference frame from secure session store..."):
             try:
@@ -358,13 +357,13 @@ if page == "Attendance Verification":
 
                 st.balloons()
                 st.success(
-                    f"✅ **Attendance Recorded!**\n\n"
+                    f"🎉 **Attendance Recorded Successfully!**\n\n"
                     f"**USN:** {matched_usn} | "
-                    f"**Face Match:** {confidence:.2f}% | "
+                    f"**Face Match Match:** {confidence:.2f}% | "
                     f"**Liveness:** {st.session_state.liveness_confidence:.1f}%"
                 )
 
-                # Log to DynamoDB Attendance Logs
+                # Log directly to DynamoDB Table
                 dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
                     'USN':                matched_usn,
                     'Timestamp':          datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -375,16 +374,16 @@ if page == "Attendance Verification":
                     'LivenessSessionId':  st.session_state.liveness_session_id or 'N/A',
                 })
 
-                # Clear tracking parameter metrics for next clean user run
                 if st.button("Proceed Next ➡️"):
                     for k, v in defaults.items():
                         st.session_state[k] = v
                     st.rerun()
 
             else:
-                st.error("❌ Face not recognised in the database. Please register first.")
+                st.error("❌ Face not recognised in the institutional database. Please register first.")
                 if st.button("Reset Portal"):
-                    for k, v in defaults.items(): st.session_state[k] = v
+                    for k, v in defaults.items(): 
+                        st.session_state[k] = v
                     st.rerun()
 
         except Exception as e:
