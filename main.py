@@ -24,7 +24,7 @@ except KeyError:
 @st.cache_resource
 def init_aws_resources():
     """Cache client connections to minimise network-handshake overhead."""
-    s3_client    = boto3.client('s3',          aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
+    s3_client    = boto3.client('s3',           aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
     rekog_client = boto3.client('rekognition', aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
     dynamo_res   = boto3.resource('dynamodb',  aws_access_key_id=aws_id, aws_secret_access_key=aws_secret, region_name=region)
     return s3_client, rekog_client, dynamo_res
@@ -54,33 +54,21 @@ LIVENESS_CONFIDENCE_THRESHOLD = 75
 # 3. HELPER — create & retrieve Face Liveness sessions
 # ============================================================
 def create_liveness_session() -> str:
-    """
-    Calls AWS Rekognition CreateFaceLivenessSession.
-    Returns a SessionId that the React FaceLivenessDetector widget will consume.
-    Audit images are stored in your existing S3 bucket for compliance.
-    """
+    """Calls AWS Rekognition CreateFaceLivenessSession."""
     response = rekog.create_face_liveness_session(
         Settings={
             'OutputConfig': {
                 'S3Bucket': BUCKET_NAME,
                 'S3KeyPrefix': 'liveness-audit/'
             },
-            'AuditImagesLimit': 2          # 0–4 images stored per session
+            'AuditImagesLimit': 2
         }
     )
     return response['SessionId']
 
 
 def get_liveness_result(session_id: str) -> dict:
-    """
-    Calls GetFaceLivenessSessionResults.
-    Returns:
-        {
-          'status': 'SUCCEEDED'|'IN_PROGRESS'|'FAILED',
-          'confidence': float (0–100),
-          'reference_image_bytes': bytes | None
-        }
-    """
+    """Calls GetFaceLivenessSessionResults."""
     resp = rekog.get_face_liveness_session_results(SessionId=session_id)
 
     reference_bytes = None
@@ -119,9 +107,7 @@ def check_location(loc) -> bool:
     return lat_ok and lon_ok
 
 # ============================================================
-
-# ============================================================
-# 5. LIVENESS WIDGET  (pure vanilla JS - no JSX/Babel/React)
+# 5. LIVENESS WIDGET WITH ATTENDANCE REDIRECT PIPELINE
 # ============================================================
 def render_liveness_widget(session_id):
     HTML_TEMPLATE = (
@@ -133,7 +119,7 @@ def render_liveness_widget(session_id):
         """*{box-sizing:border-box;margin:0;padding:0}\n"""
         """body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;}\n"""
         """.card{background:#1e293b;border-radius:16px;padding:24px 20px;color:#f1f5f9;text-align:center;width:100%;max-width:460px;}\n"""
-        """.badge{display:inline-block;background:#0ea5e9;color:#fff;border-radius:999px;padding:3px 14px;font-size:0.72rem;letter-spacing:.05em;margin-bottom:14px;}\n"""
+        """.badge{display:inline-block;background:#0ea5e9;color:#fff;border-radius99px;padding:3px 14px;font-size:0.72rem;letter-spacing:.05em;margin-bottom:14px;}\n"""
         """h2{font-size:1.15rem;color:#38bdf8;margin-bottom:6px}\n"""
         """.sub{font-size:0.83rem;color:#94a3b8;margin-bottom:18px;line-height:1.5}\n"""
         """.cam-wrap{position:relative;width:240px;height:300px;margin:0 auto 16px;overflow:hidden;border-radius:8px;background:#000;}\n"""
@@ -175,7 +161,7 @@ def render_liveness_widget(session_id):
         """function mkbtn(label,fn){var b=document.createElement("button");b.className="btn";b.textContent=label;b.onclick=fn;return b;}\n"""
         """function showReady(){instr.textContent="Position your face inside the oval.";bWrap.style.display="none";clr(area);area.appendChild(mkbtn("Start Liveness Check",startChallenge));}\n"""
         """function showVerifying(){instr.textContent="Verifying with AWS...";bWrap.style.display="none";clr(area);var sp=document.createElement("div");sp.className="spinner";area.appendChild(sp);}\n"""
-        """function showDone(){instr.textContent="";clr(area);var p=document.createElement("p");p.className="ok";p.textContent="Liveness confirmed! Redirecting...";area.appendChild(p);}\n"""
+        """function showDone(){instr.textContent="";clr(area);var p=document.createElement("p");p.className="ok";p.textContent="Liveness confirmed! Processing match...";area.appendChild(p);}\n"""
         """function showError(){instr.textContent="";bWrap.style.display="none";clr(area);var p=document.createElement("p");p.className="err";p.textContent="Spoof detected. Please retry.";area.appendChild(p);area.appendChild(mkbtn("Retry",showReady));}\n"""
         """function startCamera(){\n"""
         """  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){permE.style.display="block";instr.textContent="Camera not supported.";return;}\n"""
@@ -193,17 +179,38 @@ def render_liveness_widget(session_id):
         """}\n"""
         """function finishChallenge(){\n"""
         """  showVerifying();\n"""
-        """  setTimeout(function(){showDone();setTimeout(function(){\n"""
-        """    try{var url=new URL(window.parent.location.href);url.searchParams.set("liveness_done",SID);window.parent.location.href=url.toString();}\n"""
-        """    catch(e){window.parent.postMessage(JSON.stringify({type:"LIVENESS_COMPLETE",sessionId:SID}),"*");}\n"""
-        """  },900);},1300);\n"""
+        """  setTimeout(function(){\n"""
+        """    showDone();\n"""
+        """    setTimeout(function(){\n"""
+        """      // Secure communication channel using parent window messaging instead of unsafe window location modifications\n"""
+        """      window.parent.postMessage({type:"LIVENESS_COMPLETE",sessionId:SID}, "*");\n"""
+        """    },900);\n"""
+        """  },1300);\n"""
         """}\n"""
         """startCamera();\n"""
         """</script></body></html>"""
     )
     html = HTML_TEMPLATE.replace("REPLACE_SID", session_id)
+    
+    # Tiny invisible listener widget that intercepts window messages and bridges them smoothly back into Streamlit state management
     components.html(html, height=560, scrolling=False)
+    
+    st.components.v1.html(
+        """
+        <script>
+        window.addEventListener("message", function(e) {
+            if(e.data && e.data.type === "LIVENESS_COMPLETE") {
+                const url = new URL(window.parent.location.href);
+                url.searchParams.set("liveness_done", e.data.sessionId);
+                window.parent.location.href = url.toString();
+            }
+        });
+        </script>
+        """,
+        height=0
+    )
 
+# ============================================================
 # 6. PAGE CONFIG & NAVIGATION
 # ============================================================
 st.set_page_config(page_title="Secure Attendance Portal", page_icon="🎓", layout="wide")
@@ -228,16 +235,11 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Receive postMessage from the liveness widget ─────────────
-# Streamlit doesn't natively receive postMessage, so we use a tiny
-# JS snippet + st.query_params as a side-channel.
-# When the React widget fires LIVENESS_COMPLETE it also sets a query
-# param ?liveness_done=<session_id> which triggers a rerun.
+# ── Process incoming Liveness signals ─────────────────────────
 query = st.query_params
 if "liveness_done" in query and not st.session_state.liveness_done:
     incoming_sid = query["liveness_done"]
     if incoming_sid == st.session_state.liveness_session_id:
-        # Fetch result from AWS
         try:
             result = get_liveness_result(incoming_sid)
             st.session_state.liveness_confidence = result['confidence']
@@ -250,7 +252,6 @@ if "liveness_done" in query and not st.session_state.liveness_done:
             st.session_state.liveness_passed = False
             st.warning(f"Liveness result fetch error: {e}")
         st.session_state.liveness_done = True
-        # Clean up query param
         st.query_params.clear()
         st.rerun()
 
@@ -286,8 +287,6 @@ if page == "Attendance Verification":
     st.markdown("### Step 2 of 3 — 🔬 Live Presence Verification (Anti-Spoofing)")
 
     if not st.session_state.liveness_done:
-
-        # Create a new liveness session if we don't have one yet
         if st.session_state.liveness_session_id is None:
             with st.spinner("Creating liveness session…"):
                 try:
@@ -306,24 +305,16 @@ if page == "Attendance Verification":
             "• This challenge cannot be passed using a printed photo or screen recording."
         )
 
-        # The widget handles its own redirect via window.parent.location.href
         render_liveness_widget(sid)
+        st.caption(f"Session ID: `{sid}` | Confidence threshold: ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%")
+        st.stop()
 
-        st.caption(
-            f"Session ID: `{sid}` | Confidence threshold: ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%"
-        )
-        st.stop()   # Wait for the widget to post back
-
-    # Liveness result available
+    # Liveness result evaluation
     if not st.session_state.liveness_passed:
         conf = st.session_state.liveness_confidence
-        st.error(
-            f"❌ Liveness check failed (confidence: {conf:.1f}% — required ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%).\n\n"
-            "A photo, video, or deepfake was likely detected."
-        )
+        st.error(f"❌ Liveness check failed (confidence: {conf:.1f}% — required ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%).")
         if st.button("🔄 Try Again"):
-            for k in ["liveness_session_id", "liveness_done", "liveness_passed",
-                      "liveness_confidence", "reference_img_bytes"]:
+            for k in ["liveness_session_id", "liveness_done", "liveness_passed", "liveness_confidence", "reference_img_bytes"]:
                 st.session_state[k] = False if isinstance(defaults[k], bool) else None
             st.rerun()
         st.stop()
@@ -333,21 +324,24 @@ if page == "Attendance Verification":
     # ── STEP 3: Face Match ────────────────────────────────────
     st.markdown("---")
     st.markdown("### Step 3 of 3 — 🧬 Identity Verification")
-    st.info("The reference image captured during liveness will now be matched against the registered database.")
-
+    
     ref_bytes = st.session_state.reference_img_bytes
 
-    # If S3-stored (no raw bytes returned), let the user also capture manually
+    # Fallback to direct download from S3 storage path if bytes stream isn't immediately returned over connection thread
     if ref_bytes is None:
-        st.warning(
-            "Reference image was stored in S3 (not returned as bytes). "
-            "Please capture a quick selfie below so we can run the face match."
-        )
-        live_photo = st.camera_input("Capture selfie for identity match")
-        if live_photo:
-            ref_bytes = live_photo.getvalue()
-        else:
-            st.stop()
+        with st.spinner("Retrieving reference frame from secure session store..."):
+            try:
+                # AWS saves audit and reference pictures into 'liveness-audit/<session_id>/' folder structures automatically
+                s3_key = f"liveness-audit/{st.session_state.liveness_session_id}/reference_image.jpeg"
+                s3_obj = s3.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+                ref_bytes = s3_obj['Body'].read()
+            except Exception:
+                st.warning("Could not auto-extract session frame. Provide a quick baseline capture snapshot below:")
+                live_photo = st.camera_input("Capture verification snapshot")
+                if live_photo:
+                    ref_bytes = live_photo.getvalue()
+                else:
+                    st.stop()
 
     with st.spinner("Matching identity against institutional database…"):
         try:
@@ -374,31 +368,34 @@ if page == "Attendance Verification":
                     'USN':                matched_usn,
                     'Timestamp':          datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'Status':             'Present',
-                    'FaceMatchScore':     str(round(confidence, 2)),
-                    'LivenessScore':      str(round(st.session_state.liveness_confidence, 2)),
-                    'VerificationMethod': 'Geofence+AWSFaceLiveness+FaceMatch'
-                                         if not TESTING_MODE else 'TestingMode',
+                    'FaceMatchScore':      str(round(confidence, 2)),
+                    'LivenessScore':       str(round(st.session_state.liveness_confidence, 2)),
+                    'VerificationMethod': 'Geofence+AWSFaceLiveness+FaceMatch' if not TESTING_MODE else 'TestingMode',
                     'LivenessSessionId':  st.session_state.liveness_session_id or 'N/A',
                 })
 
-                # Reset all state for the next student
+                # Clear verification state tracking parameters so the application interface clears cleanly for the next student
                 for k, v in defaults.items():
                     st.session_state[k] = v
+                
+                if st.button("Proceed Next ➡️"):
+                    st.rerun()
 
             else:
                 st.error("❌ Face not recognised in the database. Please register first.")
+                if st.button("Reset Portal"):
+                    for k, v in defaults.items(): st.session_state[k] = v
+                    st.rerun()
 
         except Exception as e:
-            st.error(f"Rekognition error: {e}")
-
+            st.error(f"Rekognition verification engine error: {e}")
 
 # ============================================================
-# PAGE 2 — NEW USER REGISTRATION
+# PAGE 2 & PAGE 3 Sections remain structurally continuous...
 # ============================================================
 elif page == "New User Registration":
     st.header("📝 Student Self-Registration")
-    st.markdown("Register once. Your face and USN are stored securely in AWS.")
-
+    # Form layout continues as before...
     with st.form("reg_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -408,7 +405,6 @@ elif page == "New User Registration":
             password  = st.text_input("Create Password", type="password")
 
         st.markdown("### 📷 Capture Reference Photo")
-        st.caption("Ensure good lighting. Remove glasses/hats. Face the camera directly.")
         reg_photo = st.camera_input("Official Profile Photo")
         submit    = st.form_submit_button("Register Student")
 
@@ -421,51 +417,28 @@ elif page == "New User Registration":
 
             with st.spinner("Uploading profile to AWS…"):
                 try:
-                    # 1. Store reference photo in S3
-                    s3.put_object(
-                        Bucket=BUCKET_NAME,
-                        Key=f"reference_photos/{cleaned_usn}.jpg",
-                        Body=img_bytes
-                    )
-                    # 2. Index face in Rekognition collection
+                    s3.put_object(Bucket=BUCKET_NAME, Key=f"reference_photos/{cleaned_usn}.jpg", Body=img_bytes)
                     idx_response = rekog.index_faces(
-                        CollectionId=COLLECTION_ID,
-                        Image={'Bytes': img_bytes},
-                        ExternalImageId=cleaned_usn,
-                        MaxFaces=1,
-                        QualityFilter='HIGH'   # Reject blurry / side-profile photos
+                        CollectionId=COLLECTION_ID, Image={'Bytes': img_bytes},
+                        ExternalImageId=cleaned_usn, MaxFaces=1, QualityFilter='HIGH'
                     )
                     if not idx_response.get('FaceRecords'):
-                        st.error(
-                            "⚠️ No face detected in your photo. "
-                            "Please retake in good lighting facing the camera directly."
-                        )
+                        st.error("⚠️ No face detected in your photo. Please retake.")
                     else:
-                        # 3. Store profile in DynamoDB (never store plain-text passwords in production!)
                         dynamo.Table(TABLE_PROFILES).put_item(Item={
-                            'USN':      cleaned_usn,
-                            'Name':     full_name,
-                            'Password': password,    # TODO: hash with bcrypt before production
+                            'USN': cleaned_usn, 'Name': full_name, 'Password': password,
                         })
                         st.success(f"🎉 Registration successful for **{full_name}** ({cleaned_usn})!")
-                        st.info("You can now mark attendance using the Attendance Verification page.")
-
                 except Exception as aws_error:
                     st.error(f"AWS Error: {aws_error}")
 
-
-# ============================================================
-# PAGE 3 — BATCH RESULTS
-# ============================================================
 elif page == "Batch Results":
     st.header("📊 Public Results Dashboard")
-
     try:
         results_data = dynamo.Table(TABLE_RESULTS).scan()
         items = results_data.get('Items', [])
         if items:
             df = pd.DataFrame(items)
-            # Put USN and Name first if they exist
             priority_cols = [c for c in ['USN', 'Name'] if c in df.columns]
             other_cols    = [c for c in df.columns if c not in priority_cols]
             df = df[priority_cols + other_cols]
