@@ -1,8 +1,3 @@
-Here is the full, updated code with the f-string issue completely resolved.
-
-Instead of wrapping the JavaScript bridge inside a Python f-string (which caused the `SyntaxError` due to conflicting curly braces), the script now uses a clean string template with explicit token replacement (`.replace()`), making it rock-solid and safe from syntax errors.
-
-```python
 import streamlit as st
 import boto3
 import pandas as pd
@@ -443,5 +438,3 @@ elif page == "Batch Results":
             st.info("Academic results have not been uploaded yet.")
     except Exception:
         st.error("Database connection error. Ensure your DynamoDB tables are active.")
-
-```
