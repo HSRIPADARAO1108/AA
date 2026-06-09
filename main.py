@@ -119,7 +119,7 @@ def render_liveness_widget(session_id):
         """*{box-sizing:border-box;margin:0;padding:0}\n"""
         """body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;}\n"""
         """.card{background:#1e293b;border-radius:16px;padding:24px 20px;color:#f1f5f9;text-align:center;width:100%;max-width:460px;}\n"""
-        """.badge{display:inline-block;background:#0ea5e9;color:#fff;border-radius99px;padding:3px 14px;font-size:0.72rem;letter-spacing:.05em;margin-bottom:14px;}\n"""
+        """.badge{display:inline-block;background:#0ea5e9;color:#fff;border-radius:99px;padding:3px 14px;font-size:0.72rem;letter-spacing:.05em;margin-bottom:14px;}\n"""
         """h2{font-size:1.15rem;color:#38bdf8;margin-bottom:6px}\n"""
         """.sub{font-size:0.83rem;color:#94a3b8;margin-bottom:18px;line-height:1.5}\n"""
         """.cam-wrap{position:relative;width:240px;height:300px;margin:0 auto 16px;overflow:hidden;border-radius:8px;background:#000;}\n"""
@@ -182,7 +182,7 @@ def render_liveness_widget(session_id):
         """  setTimeout(function(){\n"""
         """    showDone();\n"""
         """    setTimeout(function(){\n"""
-        """      // Secure communication channel using parent window messaging instead of unsafe window location modifications\n"""
+        """      // Send message to the parent window message broker\n"""
         """      window.parent.postMessage({type:"LIVENESS_COMPLETE",sessionId:SID}, "*");\n"""
         """    },900);\n"""
         """  },1300);\n"""
@@ -191,14 +191,14 @@ def render_liveness_widget(session_id):
         """</script></body></html>"""
     )
     html = HTML_TEMPLATE.replace("REPLACE_SID", session_id)
-    
-    # Tiny invisible listener widget that intercepts window messages and bridges them smoothly back into Streamlit state management
     components.html(html, height=560, scrolling=False)
     
-    st.components.v1.html(
+    # 🌟 FIXED: The missing state broker bridge that catches the JavaScript postMessage
+    # and explicitly forces Streamlit to reload with the new query string
+    components.html(
         """
         <script>
-        window.addEventListener("message", function(e) {
+        window.parent.addEventListener("message", function(e) {
             if(e.data && e.data.type === "LIVENESS_COMPLETE") {
                 const url = new URL(window.parent.location.href);
                 url.searchParams.set("liveness_done", e.data.sessionId);
@@ -314,6 +314,7 @@ if page == "Attendance Verification":
         conf = st.session_state.liveness_confidence
         st.error(f"❌ Liveness check failed (confidence: {conf:.1f}% — required ≥ {LIVENESS_CONFIDENCE_THRESHOLD}%).")
         if st.button("🔄 Try Again"):
+            # Cleanly clear state to let the user retake the test
             for k in ["liveness_session_id", "liveness_done", "liveness_passed", "liveness_confidence", "reference_img_bytes"]:
                 st.session_state[k] = False if isinstance(defaults[k], bool) else None
             st.rerun()
@@ -327,11 +328,10 @@ if page == "Attendance Verification":
     
     ref_bytes = st.session_state.reference_img_bytes
 
-    # Fallback to direct download from S3 storage path if bytes stream isn't immediately returned over connection thread
+    # Fallback to direct download from S3 if bytes stream isn't immediately returned over connection thread
     if ref_bytes is None:
         with st.spinner("Retrieving reference frame from secure session store..."):
             try:
-                # AWS saves audit and reference pictures into 'liveness-audit/<session_id>/' folder structures automatically
                 s3_key = f"liveness-audit/{st.session_state.liveness_session_id}/reference_image.jpeg"
                 s3_obj = s3.get_object(Bucket=BUCKET_NAME, Key=s3_key)
                 ref_bytes = s3_obj['Body'].read()
@@ -364,6 +364,7 @@ if page == "Attendance Verification":
                     f"**Liveness:** {st.session_state.liveness_confidence:.1f}%"
                 )
 
+                # Log to DynamoDB Attendance Logs
                 dynamo.Table(TABLE_ATTENDANCE).put_item(Item={
                     'USN':                matched_usn,
                     'Timestamp':          datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -374,11 +375,10 @@ if page == "Attendance Verification":
                     'LivenessSessionId':  st.session_state.liveness_session_id or 'N/A',
                 })
 
-                # Clear verification state tracking parameters so the application interface clears cleanly for the next student
-                for k, v in defaults.items():
-                    st.session_state[k] = v
-                
+                # Clear tracking parameter metrics for next clean user run
                 if st.button("Proceed Next ➡️"):
+                    for k, v in defaults.items():
+                        st.session_state[k] = v
                     st.rerun()
 
             else:
@@ -391,11 +391,10 @@ if page == "Attendance Verification":
             st.error(f"Rekognition verification engine error: {e}")
 
 # ============================================================
-# PAGE 2 & PAGE 3 Sections remain structurally continuous...
+# PAGE 2 & PAGE 3
 # ============================================================
 elif page == "New User Registration":
     st.header("📝 Student Self-Registration")
-    # Form layout continues as before...
     with st.form("reg_form"):
         col1, col2 = st.columns(2)
         with col1:
