@@ -1,5 +1,6 @@
+streamlit
 boto3
 pandas
-qrcode
-pillow
-streamlit-js-eval
+numpy
+opencv-python-headless
+streamlit_js_eval
