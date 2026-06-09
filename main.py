@@ -38,9 +38,22 @@ CLASSROOM_LAT = 15.626
 CLASSROOM_LON = 76.897
 ALLOWED_RADIUS = 0.02 
 
+# 🛠️ TESTING MODE FLAG: Set to False when deploying to production students
+TESTING_MODE = True
+
 # --- 3. CORE VALIDATION UTILITIES ---
 def check_location(loc):
     """Calculates whether the student device sits inside the geofenced area boundaries."""
+    # If we are testing, log a visual bypass indicator and grant entry
+    if TESTING_MODE:
+        st.sidebar.warning("🛠️ Testing Mode Active: Geofence constraints bypassed.")
+        if loc and 'coords' in loc:
+            lat = loc['coords'].get('latitude')
+            lon = loc['coords'].get('longitude')
+            if lat is not None and lon is not None:
+                st.info(f"📍 Location Captured (Bypassed) - Lat: {lat:.4f}, Lon: {lon:.4f}")
+        return True
+
     if not loc or 'coords' not in loc:
         return False
     lat = loc['coords'].get('latitude')
@@ -94,7 +107,8 @@ if page == "Attendance Verification":
     st.markdown("### Step 1: Location Verification")
     user_location = get_geolocation()
     
-    if not user_location:
+    # In testing mode, we proceed even if the browser fails to pull geolocation structures
+    if not user_location and not TESTING_MODE:
         st.warning("📍 Action Required: Grant browser GPS location tracking permissions to continue.")
     elif not check_location(user_location):
         st.error("🚫 Access Denied: You are outside the designated classroom boundaries.")
@@ -139,7 +153,7 @@ if page == "Attendance Verification":
                                 'USN': matched_usn,
                                 'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'Status': 'Present',
-                                'VerificationMethod': 'Geofence_Plus_Liveness_Biometrics'
+                                'VerificationMethod': 'Geofence_Plus_Liveness_Biometrics' if not TESTING_MODE else 'Bypassed_Testing_Mode'
                             })
                         else:
                             st.error("❌ Identity Mismatch: Face structural features do not match any registered student.")
